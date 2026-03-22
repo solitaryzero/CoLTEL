@@ -140,7 +140,7 @@ class ColtelModel(nn.Module):
         tokenizer,
         lora_configs,
         projector_type='linear',
-        seed_length=1,
+        seed_len=1,
         **_kwargs,
     ):
         super(ColtelModel, self).__init__()
@@ -164,7 +164,7 @@ class ColtelModel(nn.Module):
         self.latent_entity_token_id = tokenizer.latent_entity_token_id
 
         self.llm_hidden_dim = llm.config.hidden_size
-        self.seed_length = seed_length
+        self.seed_length = seed_len
 
         # register adapters
         config_decoder = lora_configs['decoder']
@@ -233,7 +233,6 @@ class ColtelModel(nn.Module):
 
         # 2. Latent loss
         last_hidden_states = outputs.hidden_states[-1]
-        decoder_inputs = batch['decoder_inputs']
 
         # 2.1. Mention loss
         mention_mask = (input_ids == self.latent_mention_token_id)
@@ -241,12 +240,12 @@ class ColtelModel(nn.Module):
             mention_loss = last_hidden_states.view(-1)[0] * 0.0 # dummy loss
             mention_latents = None
         else:
-            seed_embeddings = last_hidden_states[mention_mask].view(batch_size, -1, self.llm_hidden_dim)
+            seed_embeddings = last_hidden_states[mention_mask].view(-1, self.seed_length, self.llm_hidden_dim)
             decoder_outputs = self.mention_decoder(
                 seed_embeddings=seed_embeddings,
-                input_ids=decoder_inputs['input_ids'],
-                attention_mask=decoder_inputs['attention_mask'],
-                labels=decoder_inputs['labels'],
+                input_ids=batch['decoder_input_ids'],
+                attention_mask=batch['decoder_attention_mask'],
+                labels=batch['decoder_labels'],
             )
             mention_loss = decoder_outputs.loss
             mention_latents = seed_embeddings
@@ -257,12 +256,12 @@ class ColtelModel(nn.Module):
             entity_loss = last_hidden_states.view(-1)[0] * 0.0 # dummy loss
             entity_latents = None
         else:
-            seed_embeddings = last_hidden_states[entity_mask].view(batch_size, -1, self.llm_hidden_dim)
+            seed_embeddings = last_hidden_states[entity_mask].view(-1, self.seed_length, self.llm_hidden_dim)
             decoder_outputs = self.mention_decoder(
                 seed_embeddings=seed_embeddings,
-                input_ids=decoder_inputs['input_ids'],
-                attention_mask=decoder_inputs['attention_mask'],
-                labels=decoder_inputs['labels'],
+                input_ids=batch['decoder_input_ids'],
+                attention_mask=batch['decoder_attention_mask'],
+                labels=batch['decoder_labels'],
             )
             entity_loss = decoder_outputs.loss
             entity_latents = seed_embeddings

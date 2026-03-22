@@ -34,19 +34,20 @@ def load_coltel_dataset(
 def process_naist_dictionary(
     examples,
     latent_entity_token=None,
-    seed_len=1
+    seed_len=1,
 ):
     """Processes the wikipedia dictionary with naist-nlp format."""
     def mapping_dictionary(example):
-        prompt = prompt_templates['entity'].format(
+        query = prompt_templates['entity'].format(
             description_text=example['description'],
-            latent_entity_seeds=latent_entity_token*seed_len,
         )
+        seed_tokens = latent_entity_token*seed_len,
         return {
             'id': example['id'],
-            'name': example['name'],
+            'label': example['name'],
             'description': example['description'],
-            'prompt': prompt,
+            'query': query,
+            'seed_tokens': seed_tokens,
         }
     
     dataset = examples.map(mapping_dictionary)
@@ -63,9 +64,10 @@ def retrieve_entity_by_id(
     
     return {
         "id": retrieved_examples["id"][0],
-        'name': retrieved_examples['name'][0],
+        'label': retrieved_examples['label'][0],
         "description": retrieved_examples["description"][0],
-        "prompt": retrieved_examples["prompt"][0],
+        "query": retrieved_examples["query"][0],
+        "seed_tokens": retrieved_examples["seed_tokens"][0],
     }
 
 
@@ -76,7 +78,7 @@ def process_naist_dataset(
     seed_len=1,
 ):
     """Processes the dataset with naist-nlp format."""
-    prompts, mentions, labels = [], [], []
+    queries, seed_tokens, mentions, labels = [], [], [], []
     subsets, entry_ids = [], []
     iterator = tqdm(examples.iter(batch_size=1), desc='Preprocess')
     for entry in iterator:
@@ -92,22 +94,25 @@ def process_naist_dataset(
 
             print(mention_text)
             print(retrieve_entity_by_id(dictionary, label))
+            input()
 
             augmented_text = text[:start] + mention_start_token + mention_text + mention_end_token + text[end:]
-            prompt = prompt_templates['entity'].format(
+            query = prompt_templates['entity'].format(
                 input_text=augmented_text,
                 mention=mention_text,
-                latent_mention_seeds=latent_mention_token*seed_len
             )
+            seed_token = latent_mention_token*seed_len
 
-            prompts.append(prompt)
+            queries.append(query)
+            seed_tokens.append(seed_token)
             mentions.append(mention_text)
             labels.append(entity['name'])
             subsets.append(subset)
             entry_ids.append(entry_id)
 
     processed_dataset = Dataset.from_dict({
-        'prompt': prompts,
+        'query': queries,
+        'seed_token': seed_tokens,
         'mention': mentions,
         'label': labels,
         'subset': subsets,
