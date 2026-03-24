@@ -4,9 +4,10 @@ from torch.optim.lr_scheduler import LambdaLR
 
 
 class ColtelCollator:
-    def __init__(self, tokenizer=None, max_length=2048):
+    def __init__(self, tokenizer=None, max_length=2048, input_type=0):
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.input_type = input_type
 
     def tokenize_qa_pair(
         self,
@@ -52,10 +53,10 @@ class ColtelCollator:
         }
 
 
-    def __call__(self, elements, max_length=2048):
+    def __call__(self, elements):
         queries = [e['query'] for e in elements]
         answers = [e['seed_tokens'] for e in elements]
-        tokenize_results = self.tokenize_qa_pair(queries, answers, max_length=max_length)
+        tokenize_results = self.tokenize_qa_pair(queries, answers)
 
         decoder_texts = [(e['label'] + self.tokenizer.eos_token) for e in elements]
         decoder_tokenize_results = self.tokenizer(
@@ -64,7 +65,7 @@ class ColtelCollator:
             padding=True,
             truncation=True,
             add_special_tokens=False,
-            max_length=max_length,
+            max_length=self.max_length,
         )
         decoder_input_ids = decoder_tokenize_results['input_ids']
         decoder_attention_mask = decoder_tokenize_results['attention_mask']
@@ -78,6 +79,7 @@ class ColtelCollator:
             'decoder_input_ids': decoder_input_ids,
             'decoder_labels': decoder_labels,
             'decoder_attention_mask': decoder_attention_mask,
+            "input_type": self.input_type,
         }
 
         return batch

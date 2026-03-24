@@ -10,15 +10,62 @@ from tqdm import tqdm
 
 import torch
 from transformers import AutoModelForCausalLM, GenerationConfig
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 import wandb
 from peft import LoraConfig
 
-from data import load_coltel_dataset, process_naist_dictionary, process_naist_dataset
+from data import load_coltel_dataset, load_kilt_dictionary, process_naist_dictionary, process_naist_dataset
 from utils import build_dataloader, get_constant_scheduler
 from model import ColtelTokenizer, ColtelModel
+from constants import full_special_tokens_map
 
 # TODO: 先训entity，然后固定住decoder训mention
+
+def save_model_no_accelerate(
+    model,
+    save_path,
+):
+    os.makedirs(save_path, exist_ok=True)
+
+    model.backbone.save_pretrained(os.path.join(save_path, "adapters"))
+    custom_state = {k: v.cpu() for k, v in model.state_dict().items() if "backbone" not in k}
+    torch.save(custom_state, os.path.join(save_path, "custom_components.bin"))
+    
+    print(f"[Save] Model saved to {save_path}")
+
+def save_model_accelerate(
+    model,
+    accelerator,
+    save_path,
+):
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+
+    if accelerator.is_main_process:
+        os.makedirs(save_path, exist_ok=True)
+
+        unwrapped_model.backbone.save_pretrained(os.path.join(save_path, "adapters"))
+        custom_state = {k: v.cpu() for k, v in unwrapped_model.state_dict().items() if "backbone" not in k}
+        accelerator.save(custom_state, os.path.join(save_path, "custom_components.bin"))
+        
+        print(f"[Save] Model saved to {save_path}")
+
+    accelerator.wait_for_everyone()
+
+def load_tuned_model(
+    tuned_model_path,
+    raw_model,
+):
+    custom_path = os.path.join(tuned_model_path, "custom_components.bin")
+    if os.path.exists(custom_path):
+        raw_model.load_state_dict(torch.load(custom_path), strict=False)
+
+    for adapter_name in ["adapter_mention", "adapter_entity", "adapter_decoder"]:
+        adapter_path = os.path.join(tuned_model_path, "adapters", adapter_name)
+        if os.path.exists(adapter_path):
+            raw_model.backbone.load_adapter(adapter_path, adapter_name=adapter_name)
+    
+    return raw_model
 
 def run(
     args,
@@ -43,7 +90,19 @@ def run(
         )
 
     llm = AutoModelForCausalLM.from_pretrained(args.base_model)
-    tokenizer = ColtelTokenizer.from_pretrained(args.base_model)
+
+    if ('Qwen' in args.base_model):
+        special_tokens_map = full_special_tokens_map['Qwen']
+    elif ('Llama' in args.base_model):
+        special_tokens_map = full_special_tokens_map['Llama']
+    tokenizer = ColtelTokenizer.from_pretrained(args.base_model, special_tokens_map)
+
+    if (args.recipe == 'entity'):
+        input_type = 1
+    elif (args.recipe == 'mention'):
+        input_type = 0
+    else:
+        raise NotImplementedError
 
     if tokenizer.pad_token is None:
         pad_token = tokenizer.eos_token
@@ -67,14 +126,12 @@ def run(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            modules_to_save=["embed_tokens"],
             lora_dropout=args.lora_dropout,
         ),
         'entity': LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            modules_to_save=["embed_tokens"],
             lora_dropout=args.lora_dropout,
         ),
     }
@@ -83,9 +140,15 @@ def run(
         llm=llm,
         tokenizer=tokenizer,
         lora_configs=lora_configs,
-        projector_type='2xMLP',
+        projector_type=args.projector_type,
         seed_len=args.seed_len,
     )
+
+    if (args.tuned_model_path is not None):
+        model = load_tuned_model(
+            tuned_model_path=args.tuned_model_path,
+            raw_model=model,
+        )
 
     # Train
     if args.fp16:
@@ -93,23 +156,45 @@ def run(
     elif args.bf16:
         model = model.bfloat16()
 
-    entity_dict = process_naist_dictionary(
+    entity_dict, id_to_name_map = process_naist_dictionary(
         examples=entity_dict_dataset, 
         latent_entity_token=tokenizer.latent_entity_token,
         seed_len=args.seed_len,
     )
 
-    train_dataset = process_naist_dataset(
-        examples=train_dataset,
-        dictionary=entity_dict,
-        latent_mention_token=tokenizer.latent_mention_token,
-        seed_len=args.seed_len,
-    )
+    if (args.recipe == 'entity'):
+        train_dataset, _ = process_naist_dictionary(
+            examples=train_dataset, 
+            latent_entity_token=tokenizer.latent_entity_token,
+            seed_len=args.seed_len,
+        )
+    elif (args.recipe == 'mention'):
+        train_dataset = process_naist_dataset(
+            examples=train_dataset,
+            id_to_name_map=id_to_name_map,
+            latent_mention_token=tokenizer.latent_mention_token,
+            seed_len=args.seed_len,
+        )
+
+        # Load trained stage 1 params if possible
+        if (args.tuned_model_path is not None):
+            model = load_tuned_model(args.tuned_model_path, model)
+
+            # Freeze the decoder to force mention adapter learn the information bottleneck
+            model.set_adapter_trainable(
+                adapter_name='adapter_decoder',
+                trainable=False,
+            )
+
+    else:
+        raise NotImplementedError
 
     train_dataloader = build_dataloader(
         dataset=train_dataset,
         batch_size=args.train_batch_size,
         tokenizer=tokenizer,
+        max_length=args.max_length,
+        input_type=input_type,
     )
 
     optimizer = model.get_optimizer(
@@ -119,7 +204,8 @@ def run(
     scheduler = get_constant_scheduler(optimizer)
 
     # Accelerate
-    accelerator = Accelerator(log_with="wandb")
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with="wandb")
     if (args.report_to == 'wandb') and (args.accelerate):
         accelerator.init_trackers(
             project_name='Coltel',
@@ -199,10 +285,16 @@ def run(
     tokenizer.save_pretrained(save_model_path)
 
     if args.accelerate:
-        accelerator.save_model(model, save_model_path)
+        save_model_accelerate(
+            model=model,
+            accelerator=accelerator,
+            save_path=save_model_path,
+        )
     else:
-        model_file_name = os.path.join(save_model_path, f'{args.latent_type}_colt.bin')
-        torch.save(model, model_file_name)
+        save_model_no_accelerate(
+            model=model,
+            save_path=save_model_path,
+        )
 
     time_elapsed = time.time()-start_time
     run_time = time_elapsed
@@ -210,107 +302,112 @@ def run(
     h = int(run_time//3600)
     m = int((run_time-(h*3600))//60)
     s = run_time-(h*3600)-(m*60)
-    print(f'[Training] Run time : {h}h{m}m{s}s')
+    print(f'[Training] Recipe {args.recipe} Run time : {h}h{m}m{s}s')
 
-    # # Eval
-    # if (args.do_eval) and (not(args.accelerate) or accelerator.is_main_process):
-    #     test_dataset = process_gsm8k_aug(
-    #         test_dataset,
-    #         step_latent_token=tokenizer.latent_seed_token,
-    #         step_latent_token_id=tokenizer.latent_seed_token_id,
-    #         step_seperator_token=tokenizer.latent_sep_token,
-    #         latent_end_token=tokenizer.latent_end_token,
-    #         test_mode=True,
-    #     )
+    if (args.do_eval) and (not(args.accelerate) or accelerator.is_main_process):
+        if (args.recipe == 'entity'):
+            test_dataset, _ = process_naist_dictionary(
+                examples=test_dataset, 
+                latent_entity_token=tokenizer.latent_entity_token,
+                seed_len=args.seed_len,
+            )
+        elif (args.recipe == 'mention'):
+            test_dataset = process_naist_dataset(
+                examples=test_dataset,
+                id_to_name_map=id_to_name_map,
+                latent_mention_token=tokenizer.latent_mention_token,
+                seed_len=args.seed_len,
+            )
+        else:
+            raise NotImplementedError
 
-    #     if args.fp16:
-    #         model = model.half()
-    #     elif args.bf16:
-    #         model = model.bfloat16()
+        correct, total = 0, 0
+        all_predictions = []
+        generation_config = GenerationConfig(
+            num_beams=1,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            max_new_tokens=args.max_new_tokens,
+        )
+        model.eval()
+        if (args.accelerate):
+            unwrapped_model = accelerator.unwrap_model(model)
+        else:
+            unwrapped_model = model
 
-    #     correct, total = 0, 0
-    #     total_cot_tokens = 0
-    #     generation_config = GenerationConfig(
-    #         num_beams=1,
-    #         do_sample=False,
-    #         temperature=None,
-    #         top_p=None,
-    #     )
+        for entry in tqdm(test_dataset, desc='Eval'):
+            model_inputs = {
+                'query': [entry['query']],
+                'seed_tokens': [entry['seed_tokens']],
+                'input_type': input_type,
+            }
+            prediction_outputs = unwrapped_model.predict(
+                model_inputs,
+                llm_generation_config=generation_config,
+            )
+            prediction = tokenizer.decode(prediction_outputs[0], skip_special_tokens=True)
+            golden = entry['label']
 
-    #     all_predictions = []
-    #     for entry in tqdm(test_dataset, desc='Eval'):
-    #         model_inputs = {
-    #             'question': [entry['query']],
-    #         }
+            js = {
+                'query': entry['query'],
+                'golden': golden,
+                'prediction': prediction,
+            }
+            all_predictions.append(js)
 
-    #         with torch.no_grad():
-    #             if args.accelerate:
-    #                 latent_generation_outputs = accelerator.unwrap_model(model).generate(
-    #                     model_inputs,
-    #                     llm_generation_config=generation_config,
-    #                     return_dict_in_generate=True,
-    #                     max_new_tokens=args.max_new_tokens,
-    #                 )
-    #             else:
-    #                 latent_generation_outputs = model.generate(
-    #                     model_inputs,
-    #                     llm_generation_config=generation_config,
-    #                     return_dict_in_generate=True,
-    #                     max_new_tokens=args.max_new_tokens,
-    #                 )
-    #             generation_outputs = latent_generation_outputs['prediction']
-    #             num_latents = latent_generation_outputs['num_latents']
+            if golden == prediction:
+                correct += 1
+            total += 1
 
-    #         decoded = tokenizer.decode(generation_outputs.sequences[0], skip_special_tokens=True)
-    #         golden = entry['answer'].strip().split('The answer is ')[-1].strip('.').replace(tokenizer.eos_token, '')
-    #         golden = float(golden.replace(',', '').replace(' ', ''))
-    #         try:
-    #             prediction = decoded.strip().split('The answer is ')[-1].strip('.')
-    #             prediction = float(prediction.replace(',', '').replace(' ', ''))
-    #         except (ValueError, TypeError, OverflowError) as _e:
-    #             prediction = 'Dummy prediction'
+        result = {
+            'correct': correct,
+            'total': total,
+            'accuracy': correct/total,
+        }
+        if args.report_to == 'wandb':
+            if args.accelerate:
+                wandb_tracker = accelerator.get_tracker("wandb")
+                wandb_tracker.run.summary.update(result)
+            else:
+                wandb.summary.update(result)
 
-    #         total_cot_tokens += num_latents[0].item()
-
-    #         js = {
-    #             'query': entry['query'],
-    #             'output': decoded,
-    #             'golden': golden,
-    #             'prediction': prediction,
-    #         }
-    #         all_predictions.append(js)
-
-    #         if golden == prediction:
-    #             correct += 1
-    #         total += 1
-
-    #     result = {
-    #         'correct': correct,
-    #         'total': total,
-    #         'accuracy': correct/total,
-    #         'avg_tokens': total_cot_tokens/total,
-    #     }
-    #     if args.report_to == 'wandb':
-    #         if args.accelerate:
-    #             wandb_tracker = accelerator.get_tracker("wandb")
-    #             wandb_tracker.run.summary.update(result)
-    #         else:
-    #             wandb.summary.update(result)
-
-    #     accelerator.end_training()
-    #     return model, result, all_predictions
-    # else:
-    #     accelerator.end_training()
-    #     return model, None, None
+        accelerator.wait_for_everyone()
+        accelerator.end_training()
+        return model, result, all_predictions
+    else:
+        accelerator.wait_for_everyone()
+        accelerator.end_training()
+        return model, None, None
 
 def main(args):
     """Main function entrance."""
-    train_dataset = load_coltel_dataset(split='train', data_path=args.data_path, shuffle=True)
-    test_dataset = load_coltel_dataset(split='test', data_path=args.data_path, shuffle=False)
+    entity_dict_dataset = load_kilt_dictionary(data_path=args.dictionary_path)
+
+    if (args.recipe == 'mention'):
+        train_dataset = load_coltel_dataset(split='train', data_path=args.train_data_path, shuffle=True)
+        train_dataset = train_dataset.select(range(args.num_examples))
+        if 'kilt' in args.eval_data_path:
+            test_split = 'validation'
+        else:
+            test_split = 'test'
+        test_dataset = load_coltel_dataset(split=test_split, data_path=args.eval_data_path, shuffle=False)
+    elif (args.recipe == 'entity'):
+        shuffled_dataset = entity_dict_dataset.shuffle(seed=args.seed)
+        train_dataset = shuffled_dataset.select(range(args.num_examples))
+        test_dataset = shuffled_dataset.select(range(args.num_examples, 2*args.num_examples))
+    else:
+        raise NotImplementedError
 
     save_model_path = os.path.join(args.save_model_path)
     os.makedirs(save_model_path, exist_ok=True)
-    _model, result, predictions = run(args, train_dataset, test_dataset, save_model_path)
+    _model, result, predictions = run(
+        args,
+        entity_dict_dataset,
+        train_dataset,
+        test_dataset,
+        save_model_path,
+    )
 
     if result is not None:
         print('Accuracy:')
@@ -331,15 +428,17 @@ if __name__ == '__main__':
 
     # Path args
     parser.add_argument('--base_model', type=str, required=True)
-    parser.add_argument('--data_path', type=str, required=True)
-    parser.add_argument('--result_probe_path', type=str, default=None)
+    parser.add_argument('--tuned_model_path', type=str, default=None)
+    parser.add_argument('--dictionary_path', type=str, required=True)
+    parser.add_argument('--train_data_path', type=str, required=True)
+    parser.add_argument('--eval_data_path', type=str, required=True)
     parser.add_argument('--save_model_path', type=str)
     parser.add_argument('--save_result_path', type=str, required=True)
 
     # Model args
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--bf16', action='store_true')
-    parser.add_argument('--recipe', choices=['entity', 'mention', 'sequential'])
+    parser.add_argument('--recipe', choices=['entity', 'mention', 'sequential', 'mixed'])
 
     # Latent args
     parser.add_argument('--seed_len', type=int, default=1)
@@ -361,6 +460,8 @@ if __name__ == '__main__':
     parser.add_argument('--logging_steps', type=int, default=2000)
 
     # Misc
+    parser.add_argument('--num_examples', type=int, default=200000)
+    parser.add_argument('--max_length', type=int, default=2048)
     parser.add_argument('--max_new_tokens', type=int, default=2048)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--report_to', type=str, default='none')

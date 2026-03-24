@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import get_peft_model
 
 
 class ColtelTokenizer(AutoTokenizer):
@@ -79,7 +80,8 @@ class ColtelDecoder(nn.Module):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
-            inputs_embeds: torch.Tensor = self.model.model.embed_tokens(input_ids)
+            embed_layer = self.backbone.get_input_embeddings()
+            inputs_embeds: torch.Tensor = embed_layer(input_ids)
 
         batch_size, seed_len = seed_embeddings.shape[0], seed_embeddings.shape[1]
 
@@ -112,9 +114,10 @@ class ColtelDecoder(nn.Module):
         self,
         seed_embeddings,
         llm_generation_config,
+        **kwargs,
     ):
         """Generates texts based on seed embeddings."""
-        self.backbone_llm.set_adapter(self.adapter_name)
+        self.backbone.set_adapter(self.adapter_name)
         batch_size, seed_len = seed_embeddings.shape[0], seed_embeddings.shape[1]
 
         projected_seed = self.projector(seed_embeddings)
@@ -124,10 +127,11 @@ class ColtelDecoder(nn.Module):
             device=projected_seed.device,
         )
 
-        generation_result = self.backbone_llm.generate(
+        generation_result = self.backbone.generate(
             inputs_embeds=projected_seed,
             attention_mask=attention_mask,
             generation_config=llm_generation_config,
+            **kwargs,
         )
         return generation_result
 
@@ -171,9 +175,13 @@ class ColtelModel(nn.Module):
         config_mention = lora_configs['mention']
         config_entity = lora_configs['entity']
 
-        self.backbone.add_adapter("adapter_mention", config_mention)
-        self.backbone.add_adapter("adapter_entity", config_entity)
-        self.backbone.add_adapter("adapter_decoder", config_decoder)
+        self.backbone = get_peft_model(self.backbone, config_decoder, adapter_name="adapter_decoder")
+        self.backbone.add_adapter(adapter_name="adapter_mention", peft_config=config_mention)
+        self.backbone.add_adapter(adapter_name="adapter_entity", peft_config=config_entity)
+
+        for name, param in self.backbone.named_parameters():
+            if "embed_tokens" in name:
+                param.requires_grad = True
 
         self.mention_decoder = ColtelDecoder(
             backbone=self.backbone,
@@ -186,6 +194,11 @@ class ColtelModel(nn.Module):
             projector_type=projector_type,
         )
     
+    def set_adapter_trainable(self, adapter_name, trainable=True):
+        for name, param in self.named_parameters():
+            if adapter_name in name:
+                param.requires_grad = trainable
+
     @property
     def device(self):
         """The device of model parameters."""
@@ -223,7 +236,7 @@ class ColtelModel(nn.Module):
         elif (input_type == 1): # entity data
             self.backbone.set_adapter("adapter_entity")
 
-        outputs = self.llm(
+        outputs = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
@@ -252,7 +265,7 @@ class ColtelModel(nn.Module):
 
         # 2.2. Entity loss
         entity_mask = (input_ids == self.latent_entity_token_id)
-        if (mention_mask.sum() == 0):
+        if (entity_mask.sum() == 0):
             entity_loss = last_hidden_states.view(-1)[0] * 0.0 # dummy loss
             entity_latents = None
         else:
@@ -272,7 +285,52 @@ class ColtelModel(nn.Module):
             'loss': loss,
             'ce_loss': ce_loss,
             'mention_loss': mention_loss,
-            'mention_latents': mention_latents.flatten(start_dim=1),
+            'mention_latents': mention_latents.flatten(start_dim=1) if mention_latents is not None else None,
             'entity_loss': entity_loss,
-            'entity_latents': entity_latents.flatten(start_dim=1),
+            'entity_latents': entity_latents.flatten(start_dim=1) if entity_latents is not None else None,
         }
+    
+    def predict(
+        self,
+        batch,
+        llm_generation_config,
+        **kwargs,
+    ):
+        """Generates the reasoning trail and the final answer with possible latent tool calls."""
+        tokenize_results = self.tokenizer(
+            batch['query'] + batch['seed_tokens'],
+            return_tensors="pt",
+            add_special_tokens=True,
+            padding="longest",
+            padding_side='left',
+        )
+        question_input_ids = tokenize_results['input_ids'].to(self.device)
+        question_attention_mask = tokenize_results['attention_mask'].to(self.device)
+
+        input_type = batch['input_type']
+        if (input_type == 0): # mention data
+            self.backbone.set_adapter("adapter_mention")
+        elif (input_type == 1): # entity data
+            self.backbone.set_adapter("adapter_entity")
+
+        outputs = self.backbone(
+            input_ids=question_input_ids,
+            attention_mask=question_attention_mask,
+            output_hidden_states=True,
+        )
+        last_hidden_states = outputs.hidden_states[-1]
+
+        if (input_type == 0):
+            mention_mask = (question_input_ids == self.latent_mention_token_id)
+            seed_embeddings = last_hidden_states[mention_mask].view(-1, self.seed_length, self.llm_hidden_dim)
+        elif (input_type == 1):
+            entity_mask = (question_input_ids == self.latent_entity_token_id)
+            seed_embeddings = last_hidden_states[entity_mask].view(-1, self.seed_length, self.llm_hidden_dim)
+
+        decoder_outputs = self.mention_decoder.generate(
+            seed_embeddings=seed_embeddings,
+            llm_generation_config=llm_generation_config,
+            **kwargs,
+        )
+
+        return decoder_outputs

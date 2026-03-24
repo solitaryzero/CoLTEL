@@ -1,7 +1,10 @@
 from datasets import load_dataset
 
-ds = load_dataset("naist-nlp/kilt")
-ds.save_to_disk('./data/kilt')
+ds = load_dataset("naist-nlp/kilt", 'dataset')
+ds.save_to_disk('./data/kilt/dataset')
+
+ds = load_dataset("naist-nlp/kilt", 'dictionary')
+ds.save_to_disk('./data/kilt/dictionary')
 
 ds = load_dataset("naist-nlp/wned-wiki")
 ds.save_to_disk('./data/wned-wiki')
