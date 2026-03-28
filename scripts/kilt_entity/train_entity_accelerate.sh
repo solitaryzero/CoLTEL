@@ -2,7 +2,7 @@ MODEL_NAME="Qwen3-8B"
 MODEL_IDENTIFIER_OR_PATH="./models/Qwen3-8B"
 SEED_LEN=2
 
-accelerate launch --multi_gpu --num_processes=2 ./src/coltel/train.py \
+accelerate launch --multi_gpu --num_processes=2 --gpu_ids 6,7 ./src/coltel/train.py \
     --base_model ${MODEL_IDENTIFIER_OR_PATH} \
     --dictionary_path ./data/kilt \
     --train_data_path ./data/kilt \
@@ -21,7 +21,7 @@ accelerate launch --multi_gpu --num_processes=2 ./src/coltel/train.py \
     --do_eval \
     --learning_rate 1e-5 \
     --grad_clip 1 \
-    --train_batch_size 8 \
+    --train_batch_size 4 \
     --epoch 1 \
     --logging_steps 200 \
     --num_examples 200000 \

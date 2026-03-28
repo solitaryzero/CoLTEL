@@ -58,8 +58,10 @@ def process_naist_dictionary(
 ):
     """Processes the wikipedia dictionary with naist-nlp format."""
     def mapping_dictionary(example):
+        window = 500
+
         query = prompt_templates['entity'].format(
-            description_text=example['description'],
+            description_text=example['description'][:window],
         )
         seed_tokens = latent_entity_token*seed_len
 
@@ -98,8 +100,12 @@ def process_naist_dataset(
                 start, end, label = entity['start'], entity['end'], entity['label'][0]
                 mention_text = text[start:end]
                 retrieved_entity = id_to_name_map[label]
+                
+                window = 200
+                left_start_pos = max(0, start-window)
+                right_end_pos = min(len(text), end+window)
 
-                augmented_text = text[:start] + mention_start_token + mention_text + mention_end_token + text[end:]
+                augmented_text = text[left_start_pos:start] + mention_start_token + mention_text + mention_end_token + text[end:right_end_pos]
                 query = prompt_templates['mention'].format(
                     input_text=augmented_text,
                     mention=mention_text,

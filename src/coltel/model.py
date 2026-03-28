@@ -242,7 +242,8 @@ class ColtelModel(nn.Module):
             labels=labels,
             output_hidden_states=True,
         )
-        ce_loss = outputs.loss
+        # ce_loss = outputs.loss
+        ce_loss = outputs.loss * 0.0 # nullify ce loss
 
         # 2. Latent loss
         last_hidden_states = outputs.hidden_states[-1]

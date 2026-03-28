@@ -13,6 +13,6 @@ mention_start_token = '<MENTION>'
 mention_end_token = '</MENTION>'
 
 prompt_templates = {
-    'mention': '{input_text}\n\nThe mention "{mention}" between <MENTION> and </MENTION> could refer to an entity with the name of ',
-    'entity': '{description_text}\n\nThe text is describing an entity named ',
+    'mention': 'You are en expert in entity linking.\n{input_text}\n\nThe mention "{mention}" between <MENTION> and </MENTION> could refer to an entity with the name of ',
+    'entity': 'You are en expert in entity linking.\n{description_text}\n\nThe text is describing an entity named ',
 }
