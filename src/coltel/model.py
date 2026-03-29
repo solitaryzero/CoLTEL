@@ -180,7 +180,7 @@ class ColtelModel(nn.Module):
         self.backbone.add_adapter(adapter_name="adapter_entity", peft_config=config_entity)
 
         for name, param in self.backbone.named_parameters():
-            if "embed_tokens" in name:
+            if ("embed_tokens" in name) or ("lm_head" in name):
                 param.requires_grad = True
 
         self.mention_decoder = ColtelDecoder(

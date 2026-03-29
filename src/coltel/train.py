@@ -395,7 +395,7 @@ def main(args):
     elif (args.recipe == 'entity'):
         shuffled_dataset = entity_dict_dataset.shuffle(seed=args.seed)
         train_dataset = shuffled_dataset.select(range(args.num_examples))
-        test_dataset = shuffled_dataset.select(range(args.num_examples, 2*args.num_examples))
+        test_dataset = shuffled_dataset.select(range(args.num_examples, int(1.1*args.num_examples)))
     else:
         raise NotImplementedError
 
