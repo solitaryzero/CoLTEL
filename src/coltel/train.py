@@ -282,19 +282,22 @@ def run(
                 scheduler.step()
                 optimizer.zero_grad()
 
-    tokenizer.save_pretrained(save_model_path)
-
     if args.accelerate:
-        save_model_accelerate(
-            model=model,
-            accelerator=accelerator,
-            save_path=save_model_path,
-        )
+        if (accelerator.is_main_process):
+            tokenizer.save_pretrained(save_model_path)
+            save_model_accelerate(
+                model=model,
+                accelerator=accelerator,
+                save_path=save_model_path,
+            )
     else:
+        tokenizer.save_pretrained(save_model_path)
         save_model_no_accelerate(
             model=model,
             save_path=save_model_path,
         )
+
+    accelerator.wait_for_everyone()
 
     time_elapsed = time.time()-start_time
     run_time = time_elapsed
