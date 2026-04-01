@@ -22,10 +22,10 @@ python ./src/coltel/train.py \
     --do_eval \
     --learning_rate 1e-5 \
     --grad_clip 1 \
-    --train_batch_size 8 \
+    --train_batch_size 4 \
     --epoch 1 \
     --logging_steps 200 \
-    --num_examples 200000 \
+    --num_examples 500000 \
     --max_length 2048 \
     --max_new_tokens 64 \
     --report_to none \
