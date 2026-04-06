@@ -151,6 +151,7 @@ def run(
         max_new_tokens=args.max_new_tokens,
     )
     model.eval()
+    model = model.to('cuda')
 
     for entry in tqdm(test_dataset, desc='Eval'):
         model_inputs = {
@@ -198,7 +199,7 @@ def main(args):
         test_dataset = load_coltel_dataset(split=test_split, data_path=args.eval_data_path, shuffle=False)
     elif (args.recipe == 'entity'):
         shuffled_dataset = entity_dict_dataset.shuffle(seed=args.seed)
-        test_dataset = shuffled_dataset.select(range(args.num_examples, int(1.1*args.num_examples)))
+        test_dataset = shuffled_dataset.select(range(args.num_examples, args.num_examples+5000))
     else:
         raise NotImplementedError
 

@@ -90,7 +90,7 @@ def process_naist_dataset(
         batch_size = len(batch['id'])
         queries, seed_tokens, mentions, labels = [], [], [], []
         subsets, entry_ids = [], []
-        for i in range(batch_size):
+        for i in tqdm(range(batch_size)):
             text = batch['text'][i]
             subset = batch['subset'][i]
             entry_id = batch['id'][i]
@@ -101,7 +101,7 @@ def process_naist_dataset(
                 mention_text = text[start:end]
                 retrieved_entity = id_to_name_map[label]
                 
-                window = 200
+                window = 180
                 left_start_pos = max(0, start-window)
                 right_end_pos = min(len(text), end+window)
 
