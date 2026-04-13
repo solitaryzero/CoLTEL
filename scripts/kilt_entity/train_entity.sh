@@ -1,6 +1,9 @@
 MODEL_NAME="Qwen3-8B"
 MODEL_IDENTIFIER_OR_PATH="./models/Qwen3-8B"
-SEED_LEN=2
+SEED_LEN=8
+LORA_R=128
+LORA_ALPHA=128
+LORA_DROPOUT=0.05
 
 CUDA_VISIBLE_DEVICES=0 python ./src/coltel/train.py \
     --base_model ${MODEL_IDENTIFIER_OR_PATH} \
@@ -12,13 +15,13 @@ CUDA_VISIBLE_DEVICES=0 python ./src/coltel/train.py \
     --projector_type 2xMLP \
     --bf16 \
     --use_lora \
-    --lora_r 32 \
-    --lora_alpha 64 \
-    --lora_dropout 0 \
-    --save_model_path ./models/${MODEL_NAME}_stage1_entity \
-    --save_result_path ./output/${MODEL_NAME}_stage1_entity \
+    --lora_r ${LORA_R} \
+    --lora_alpha ${LORA_ALPHA} \
+    --lora_dropout ${LORA_DROPOUT} \
+    --save_model_path ./models/${MODEL_NAME}_stage1_entity_r${LORA_R}_a${LORA_ALPHA}_sl${SEED_LEN} \
+    --save_result_path ./output/${MODEL_NAME}_stage1_entity_r${LORA_R}_a${LORA_ALPHA}_sl${SEED_LEN} \
     --do_eval \
-    --learning_rate 1e-5 \
+    --learning_rate 2e-4 \
     --grad_clip 1 \
     --train_batch_size 4 \
     --epoch 1 \

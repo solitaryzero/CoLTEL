@@ -100,10 +100,3 @@ def build_dataloader(
     )
 
     return dataloader
-
-
-def get_constant_scheduler(
-    optimizer,
-    last_epoch=-1
-):
-    return LambdaLR(optimizer, lambda x: 1, last_epoch=last_epoch)

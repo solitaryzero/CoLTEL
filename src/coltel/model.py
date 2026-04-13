@@ -179,9 +179,9 @@ class ColtelModel(nn.Module):
         self.backbone.add_adapter(adapter_name="adapter_mention", peft_config=config_mention)
         self.backbone.add_adapter(adapter_name="adapter_entity", peft_config=config_entity)
 
-        for name, param in self.backbone.named_parameters():
-            if ("embed_tokens" in name) or ("lm_head" in name):
-                param.requires_grad = True
+        # for name, param in self.backbone.named_parameters():
+        #     if ("embed_tokens" in name) or ("lm_head" in name):
+        #         param.requires_grad = True
 
         self.mention_decoder = ColtelDecoder(
             backbone=self.backbone,
@@ -271,7 +271,7 @@ class ColtelModel(nn.Module):
             entity_latents = None
         else:
             seed_embeddings = last_hidden_states[entity_mask].view(-1, self.seed_length, self.llm_hidden_dim)
-            decoder_outputs = self.mention_decoder(
+            decoder_outputs = self.entity_decoder(
                 seed_embeddings=seed_embeddings,
                 input_ids=batch['decoder_input_ids'],
                 attention_mask=batch['decoder_attention_mask'],
@@ -298,8 +298,10 @@ class ColtelModel(nn.Module):
         **kwargs,
     ):
         """Generates the reasoning trail and the final answer with possible latent tool calls."""
+        
+        text_inputs = [q + s for q, s in zip(batch['query'], batch['seed_tokens'])]
         tokenize_results = self.tokenizer(
-            batch['query'] + batch['seed_tokens'],
+            text_inputs,
             return_tensors="pt",
             add_special_tokens=True,
             padding="longest",
@@ -307,6 +309,9 @@ class ColtelModel(nn.Module):
         )
         question_input_ids = tokenize_results['input_ids'].to(self.device)
         question_attention_mask = tokenize_results['attention_mask'].to(self.device)
+
+        # question_input_ids = batch['input_ids'].to(self.device)
+        # question_attention_mask = batch['attention_mask'].to(self.device)
 
         input_type = batch['input_type']
         if (input_type == 0): # mention data
@@ -324,14 +329,20 @@ class ColtelModel(nn.Module):
         if (input_type == 0):
             mention_mask = (question_input_ids == self.latent_mention_token_id)
             seed_embeddings = last_hidden_states[mention_mask].view(-1, self.seed_length, self.llm_hidden_dim)
+        
+            decoder_outputs = self.mention_decoder.generate(
+                seed_embeddings=seed_embeddings,
+                llm_generation_config=llm_generation_config,
+                **kwargs,
+            )
         elif (input_type == 1):
             entity_mask = (question_input_ids == self.latent_entity_token_id)
             seed_embeddings = last_hidden_states[entity_mask].view(-1, self.seed_length, self.llm_hidden_dim)
 
-        decoder_outputs = self.mention_decoder.generate(
-            seed_embeddings=seed_embeddings,
-            llm_generation_config=llm_generation_config,
-            **kwargs,
-        )
+            decoder_outputs = self.entity_decoder.generate(
+                seed_embeddings=seed_embeddings,
+                llm_generation_config=llm_generation_config,
+                **kwargs,
+            )
 
         return decoder_outputs

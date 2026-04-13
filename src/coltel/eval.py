@@ -10,12 +10,10 @@ from tqdm import tqdm
 
 import torch
 from transformers import AutoModelForCausalLM, GenerationConfig
-from accelerate import Accelerator, DistributedDataParallelKwargs
 import wandb
 from peft import LoraConfig
 
 from data import load_coltel_dataset, load_kilt_dictionary, process_naist_dictionary, process_naist_dataset
-from utils import build_dataloader, get_constant_scheduler
 from model import ColtelTokenizer, ColtelModel
 from constants import full_special_tokens_map
 

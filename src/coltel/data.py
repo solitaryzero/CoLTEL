@@ -58,7 +58,7 @@ def process_naist_dictionary(
 ):
     """Processes the wikipedia dictionary with naist-nlp format."""
     def mapping_dictionary(example):
-        window = 500
+        window = 400
 
         query = prompt_templates['entity'].format(
             description_text=example['description'][:window],

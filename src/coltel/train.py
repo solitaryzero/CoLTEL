@@ -9,13 +9,13 @@ import pickle
 from tqdm import tqdm
 
 import torch
-from transformers import AutoModelForCausalLM, GenerationConfig
+from transformers import AutoModelForCausalLM, GenerationConfig, get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 from accelerate import Accelerator, DistributedDataParallelKwargs
 import wandb
 from peft import LoraConfig
 
 from data import load_coltel_dataset, load_kilt_dictionary, process_naist_dictionary, process_naist_dataset
-from utils import build_dataloader, get_constant_scheduler
+from utils import build_dataloader
 from model import ColtelTokenizer, ColtelModel
 from constants import full_special_tokens_map
 
@@ -201,7 +201,10 @@ def run(
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    scheduler = get_constant_scheduler(optimizer)
+    # scheduler = get_constant_schedule_with_warmup(
+    #     optimizer,
+    #     num_warmup_steps=500,
+    # )
 
     # Accelerate
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -219,6 +222,13 @@ def run(
                 'epoch': args.epoch,
             }
         )
+
+    total_training_steps = (len(train_dataloader) * args.epoch)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=500,
+        num_training_steps=total_training_steps,
+    )
 
     train_dataloader, model, optimizer, scheduler = accelerator.prepare(
         train_dataloader, model, optimizer, scheduler
@@ -307,6 +317,8 @@ def run(
     s = run_time-(h*3600)-(m*60)
     print(f'[Training] Recipe {args.recipe} Run time : {h}h{m}m{s}s')
 
+    result, all_predictions = None, None
+
     if (args.do_eval) and (not(args.accelerate) or accelerator.is_main_process):
         if (args.recipe == 'entity'):
             test_dataset, _ = process_naist_dictionary(
@@ -338,6 +350,22 @@ def run(
             unwrapped_model = accelerator.unwrap_model(model)
         else:
             unwrapped_model = model
+
+        # eval_dataloader = build_dataloader(
+        #     dataset=test_dataset,
+        #     batch_size=args.train_batch_size,
+        #     tokenizer=tokenizer,
+        #     max_length=args.max_length,
+        #     input_type=input_type,
+        # )
+
+        # for batch in tqdm(eval_dataloader, desc='Eval'):
+        #     # You will need to slightly adapt your predict() function 
+        #     # to handle batched dictionaries instead of single entries
+        #     prediction_outputs = unwrapped_model.predict(
+        #         batch,
+        #         llm_generation_config=generation_config,
+        #     )
 
         for entry in tqdm(test_dataset, desc='Eval'):
             model_inputs = {
@@ -375,13 +403,9 @@ def run(
             else:
                 wandb.summary.update(result)
 
-        accelerator.wait_for_everyone()
-        accelerator.end_training()
-        return model, result, all_predictions
-    else:
-        accelerator.wait_for_everyone()
-        accelerator.end_training()
-        return model, None, None
+    accelerator.wait_for_everyone()
+    accelerator.end_training()
+    return model, result, all_predictions
 
 def main(args):
     """Main function entrance."""
